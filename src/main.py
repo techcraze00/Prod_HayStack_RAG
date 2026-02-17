@@ -12,7 +12,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 import json
 
 from src.config import settings
-from src.ingestion.parser import DocumentParser, ParsedElement
+from src.ingestion.unstructured_parser import DocumentParser, ParsedElement
 from src.ingestion.vision import VisionProcessor
 from src.ingestion.tables import TableReformatter
 from src.ingestion.semantic_chunker import SemanticChunker
@@ -28,9 +28,10 @@ console = Console()
 class RAGSystem:
     """Main RAG system orchestrator"""
 
-    def __init__(self, use_groq: bool = False):
+    def __init__(self, use_groq: bool = False, use_docling: bool = False):
         self.settings = settings
         self.use_groq = use_groq
+        self.use_docling = use_docling
         self._initialize_components()
 
     def _initialize_components(self):
@@ -96,10 +97,24 @@ class RAGSystem:
         )
 
         # Initialize parser
-        self.parser = DocumentParser(
-            vision_processor=self.vision_processor,
-            table_reformatter=self.table_reformatter,
-        )
+        if self.use_docling:
+            if not settings.docling_model_path:
+                console.print(
+                    "[bold red]Error:[/bold red] --docling flag used but DOCLING_MODEL_PATH not set in .env"
+                )
+                exit(1)
+            from src.ingestion.docling_parser import DoclingParser
+
+            console.print(
+                f"[bold green]Using Docling parser[/bold green] "
+                f"(Model: {settings.docling_model_path})"
+            )
+            self.parser = DoclingParser(model_path=settings.docling_model_path)
+        else:
+            self.parser = DocumentParser(
+                vision_processor=self.vision_processor,
+                table_reformatter=self.table_reformatter,
+            )
 
         # Initialize chunker
         self.chunker = SemanticChunker(
@@ -498,11 +513,19 @@ def main():
         help="Use Groq API (with rotation) instead of local Ollama",
     )
 
+    # Docling arg (for ingest only)
+    docling_args = argparse.ArgumentParser(add_help=False)
+    docling_args.add_argument(
+        "--docling",
+        action="store_true",
+        help="Use Docling parser instead of unstructured (requires DOCLING_MODEL_PATH in .env)",
+    )
+
     # Ingest command
     ingest_parser = subparsers.add_parser(
         "ingest",
         help="Ingest documents",
-        parents=[groq_args],
+        parents=[groq_args, docling_args],
     )
     ingest_parser.add_argument("path", help="File or directory to ingest")
     ingest_parser.add_argument(
@@ -538,9 +561,10 @@ def main():
         parser.print_help()
         return
 
-    # Initialize system with Groq flag
+    # Initialize system with flags
     use_groq = getattr(args, "groq", False)
-    system = RAGSystem(use_groq=use_groq)
+    use_docling = getattr(args, "docling", False)
+    system = RAGSystem(use_groq=use_groq, use_docling=use_docling)
 
     if args.command == "ingest":
         path = Path(args.path)

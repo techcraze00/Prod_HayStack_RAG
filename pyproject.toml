@@ -18,6 +18,9 @@ dependencies = [
     "tenacity>=8.2.0",
     "tiktoken>=0.8.0",
     "requests>=2.31.0",
+    "ipykernel>=7.2.0",
+    "traitlets>=5.14.3",
+    "docling>=2.73.1",
 ]
 
 [project.optional-dependencies]

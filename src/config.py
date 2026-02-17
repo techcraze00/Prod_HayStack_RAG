@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # File Paths
     parsed_docs_dir: str = Field(default="./parsed_docs", alias="PARSED_DOCS_DIR")
 
+    # Docling Configuration
+    docling_model_path: str = Field(default="", alias="DOCLING_MODEL_PATH")
+
     # ─── Enhancement 1: Hybrid Search ────────────────────────────────
     hybrid_search_enabled: bool = Field(default=False, alias="HYBRID_SEARCH_ENABLED")
     hybrid_vector_weight: float = Field(default=0.7, alias="HYBRID_VECTOR_WEIGHT")

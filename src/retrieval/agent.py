@@ -110,7 +110,7 @@ class AdvancedRAGAgent:
                 chat_generator=self.generator,
                 tools=tools,
                 system_prompt=self.AGENT_SYSTEM_PROMPT,
-                max_steps=self.max_iterations,
+                max_agent_steps=self.max_iterations,
             )
             return agent
         except ImportError:
