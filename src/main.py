@@ -98,18 +98,10 @@ class RAGSystem:
 
         # Initialize parser
         if self.use_docling:
-            if not settings.docling_model_path:
-                console.print(
-                    "[bold red]Error:[/bold red] --docling flag used but DOCLING_MODEL_PATH not set in .env"
-                )
-                exit(1)
             from src.ingestion.docling_parser import DoclingParser
 
-            console.print(
-                f"[bold green]Using Docling parser[/bold green] "
-                f"(Model: {settings.docling_model_path})"
-            )
-            self.parser = DoclingParser(model_path=settings.docling_model_path)
+            console.print("[bold green]Using Docling parser[/bold green]")
+            self.parser = DoclingParser()
         else:
             self.parser = DocumentParser(
                 vision_processor=self.vision_processor,
