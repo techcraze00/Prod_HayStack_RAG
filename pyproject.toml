@@ -21,6 +21,10 @@ dependencies = [
     "ipykernel>=7.2.0",
     "traitlets>=5.14.3",
     "docling>=2.73.1",
+    "langchain-core>=1.2.13",
+    "langchain-ollama>=1.0.1",
+    "faiss-cpu>=1.13.2",
+    "langchain-community>=0.4.1",
 ]
 
 [project.optional-dependencies]

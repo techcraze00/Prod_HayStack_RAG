@@ -5,11 +5,16 @@ CLI entry point and RAGSystem orchestrator class.
 """
 
 import argparse
+import os
 from pathlib import Path
+
+# Workaround for macOS OpenMP multiple initialization error caused by faiss-cpu
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 import json
+import uuid
 
 from src.config import settings
 from src.ingestion.unstructured_parser import DocumentParser, ParsedElement
@@ -408,14 +413,22 @@ class RAGSystem:
             )
 
     def query_interactive(self):
-        """Interactive query mode."""
-        agent = self._create_agent()
+        """Interactive query mode with Conversation Memory."""
+        from src.retrieval.session import RAGSession
+        from src.agents.orchestrator import Orchestrator
+        
+        rag_agent = self._create_agent()
+        orchestrator = Orchestrator(rag_agent=rag_agent)
+        session_id = str(uuid.uuid4())[:8]
+        session = RAGSession(session_id=session_id)
 
         console.print(
             Panel(
-                "[bold]RAG3 System[/bold]\n\n"
-                "Vector Search: \u2713\n\n"
-                "Type 'exit' to quit.",
+                f"[bold]RAG3 System[/bold]\n\n"
+                f"Session ID: {session_id}\n"
+                f"Memory: \u2713\n"
+                f"Vector Search: \u2713\n\n"
+                f"Type 'exit' to quit.",
                 title="Interactive Mode",
                 border_style="blue",
             )
@@ -437,18 +450,27 @@ class RAGSystem:
                     console=console,
                 ) as progress:
                     task = progress.add_task("Thinking...", total=None)
-                    result = agent.query(
-                        question,
-                        use_expansion=True,
-                        use_reranking=True,
-                        use_reflection=True,
-                    )
+                    
+                    try:
+                        # Orchestrator handles retrieval + routing internal to the session
+                        answer = orchestrator.run(query=question, session=session)
+                        iterations = 1 # Orchestrator currently abstracts iterations
+                    except Exception as e:
+                        import logging
+                        logging.error(f"Error during orchestration: {e}")
+                        answer = "An error occurred while processing your request. Please try again."
+                        iterations = 0
+                        
                     progress.update(task, completed=True)
+
+                # Add interactions to memory
+                session.add_user_message(question)
+                session.add_ai_message(answer)
 
                 console.print(
                     Panel(
-                        result["answer"],
-                        title=f"[green]Answer[/green] ({result['iterations']} iterations)",
+                        answer,
+                        title=f"[green]Answer[/green] ({iterations} iterations)",
                         border_style="green",
                     )
                 )

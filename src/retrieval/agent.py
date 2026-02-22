@@ -124,6 +124,8 @@ class AdvancedRAGAgent:
     def query(
         self,
         question: str,
+        chat_history: List[ChatMessage] = None,
+        memory_context: str = "",
         use_expansion: bool = True,
         use_reranking: bool = True,
         use_reflection: bool = True,
@@ -134,6 +136,8 @@ class AdvancedRAGAgent:
 
         Args:
             question: User question.
+            chat_history: Previous messages for short-term memory session context.
+            memory_context: Extra string to inject (Episodic, Core memory).
             use_expansion: Enable query expansion.
             use_reranking: Enable re-ranking.
             use_reflection: Enable self-reflection.
@@ -204,9 +208,26 @@ class AdvancedRAGAgent:
                     # Use Haystack Agent
                     try:
                         for q in queries:
-                            result = self._agent.run(
-                                messages=[ChatMessage.from_user(q)]
-                            )
+                            
+                            # Construct Context-Aware Prompt
+                            full_q = q
+                            if memory_context:
+                                full_q = f"Memory Context:\n{memory_context}\n\nQuestion:\n{q}"
+
+                            # Incorporate Short-term Chat History
+                            msgs = []
+                            if chat_history:
+                                for m in chat_history:
+                                    # Handle langchain messages (which have .type or .__class__.__name__)
+                                    msg_type = getattr(m, "type", "human")
+                                    if type(m).__name__ == "HumanMessage" or msg_type == "human":
+                                        msgs.append(ChatMessage.from_user(m.content))
+                                    else:
+                                        msgs.append(ChatMessage.from_assistant(m.content))
+                            
+                            msgs.append(ChatMessage.from_user(full_q))
+                            
+                            result = self._agent.run(messages=msgs)
                             if "messages" in result:
                                 last_msg = result["messages"][-1]
                                 iteration_results.append(

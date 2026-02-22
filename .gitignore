@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 .env
 *.egg-info/
+.claude
+ignore/
+
+SESSION.md

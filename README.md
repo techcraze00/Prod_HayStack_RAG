@@ -1,8 +1,12 @@
 # RAG3
 
-Production Retrieval-Augmented Generation system built on [Haystack](https://haystack.deepset.ai/) (v0.1.0).
+Production Retrieval-Augmented Generation system built with an **Agentic Workflow Architecture** on [Haystack](https://haystack.deepset.ai/) (v2.x).
 
-PostgreSQL-only vector RAG with semantic chunking, hybrid search, agentic retrieval, and Ollama-native reranking.
+Features:
+- **Multi-Tier Memory**: Episodic vector persistence and conversational sliding-window RAM.
+- **Advanced Semantic Router**: Parallel LLM and Vector-grounding to perfectly route domain queries from general trivia.
+- **Agentic Supervisor**: Orchestrator-managed Worker nodes (`VectorAgent`, `GeneralAgent`) for optimized inference.
+- **PostgreSQL-native**: pgvector vector RAG with semantic chunking, hybrid search, and Ollama reranking.
 
 ## Prerequisites
 
@@ -111,6 +115,44 @@ python -m src.main query -i
 python -m src.main query "What is X?" --groq
 ```
 
+## Core Architecture & Agentic Workflow
+
+RAG3 replaces the monolithic generation loop with a 4-part **Agentic Workflow Architecture**:
+
+```mermaid
+graph TD
+    User([User]) --> CLI[Interactive CLI]
+    CLI --> Session[RAGSession</br>Sliding Window RAM]
+    Session --> Orch[Orchestrator]
+    
+    Orch --> Router[IntentRouter </br> Semantic + Syllabus]
+    
+    %% Router evaluating Intent
+    Router -->|General Chat| D1{Is it Trivia/Greetings?}
+    Router -->|Domain Query| D2{Is it Factual Document Extraction?}
+    
+    D1 --> GA[GeneralAgent]
+    D2 --> VA[VectorAgent / AdvancedRAGAgent]
+    
+    GA --> Synth[Synthesizer]
+    VA --> Synth
+    
+    Synth --> Orch
+    Orch --> Session
+    Session --> User
+    
+    %% Vector Agent Sub-Tree
+    subgraph Vector Retrieval Tools
+        VA --> FAISS[(FAISS Episodic Memory)]
+        VA --> PG[(PostgreSQL + pgvector)]
+    end
+```
+
+### Memory System
+RAG3 integrates deep conversational memory:
+- **Sliding Window:** Temporarily stores the last N messages in RAM.
+- **Episodic Persistence:** Once the sliding window fills up, older segments are summarized by an LLM and stored as vectors in a local FAISS database for long-term historical recall.
+
 ## Optional Enhancements
 
 All enhancements are disabled by default. Enable them in `.env`:
@@ -131,6 +173,17 @@ All enhancements are disabled by default. Enable them in `.env`:
 src/
 ├── config.py                        # Pydantic Settings (all config via .env)
 ├── main.py                          # CLI entry point + RAGSystem orchestrator
+├── agents/                          # Agentic Workflow Components
+│   ├── orchestrator.py              # Central supervisor node
+│   ├── router.py                    # Advanced Semantic Intent Router
+│   ├── synthesizer.py               # Output formatter
+│   └── workers/
+│       ├── general_agent.py         # Fast conversational LLM wrapper
+│       └── vector_agent.py          # Vector query wrapper for AdvancedRAGAgent
+├── memory/                          # Conversational State
+│   ├── memory_tools.py              # Context builders
+│   ├── summarizer.py                # Turn-based historic summarizer
+│   └── vector_store.py              # FAISS Episodic/Archival persistence
 ├── utils/
 │   ├── llm.py                       # chat_sync() helper for Haystack generators
 │   └── groq_client.py               # RotatableGroqGenerator (key rotation + rate limits)
