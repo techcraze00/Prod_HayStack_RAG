@@ -151,44 +151,9 @@ python -m src.main query "What is X?" --groq
 
 RAG3 replaces the monolithic generation loop with a multi-agent **Agentic Workflow Architecture** supporting 4 intent types:
 
-```mermaid
-graph TD
-    User([User]) --> CLI[Interactive CLI]
-    CLI --> Session["RAGSession\nSliding Window + Graph Memory"]
-    Session --> Orch[Orchestrator]
-
-    Orch --> Router["IntentRouter\n4-Tier Classification"]
-
-    Router -->|GeneralChat| GA[GeneralAgent]
-    Router -->|VectorRetrieval| VA[VectorAgent]
-    Router -->|GraphRetrieval| GrA["GraphAgent"]
-    Router -->|HybridRetrieval| HF["GraphVectorFusion"]
-
-    GA --> Synth[Synthesizer]
-    VA --> Synth
-    GrA --> Synth
-    HF --> Synth
-
-    Synth --> Orch --> Session --> User
-
-    subgraph "Vector Pipeline"
-        VA --> PG[(PostgreSQL + pgvector)]
-    end
-
-    subgraph "Graph Pipeline"
-        GrA --> Neo[(Neo4j via Graphiti)]
-    end
-
-    subgraph "Hybrid Pipeline"
-        HF --> PG
-        HF --> Neo
-    end
-
-    subgraph "Memory"
-        Session --> FAISS[(FAISS Episodic)]
-        Session --> GraphMem[(Graph Episodic)]
-    end
-```
+<div align="center">
+  <img src="./public/rag-architecture-neon.svg" alt="RAG Architecture Diagram" width="100%">
+</div>
 
 ### Intent Routing
 
