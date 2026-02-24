@@ -1,12 +1,13 @@
 # RAG3
 
-Production Retrieval-Augmented Generation system built with an **Agentic Workflow Architecture** on [Haystack](https://haystack.deepset.ai/) (v2.x).
+Production Retrieval-Augmented Generation system built with an **Agentic Workflow Architecture** on [Haystack](https://haystack.deepset.ai/) (v2.x), with a full **Graph RAG** pipeline powered by Neo4j + Graphiti.
 
 Features:
-- **Multi-Tier Memory**: Episodic vector persistence and conversational sliding-window RAM.
-- **Advanced Semantic Router**: Parallel LLM and Vector-grounding to perfectly route domain queries from general trivia.
-- **Agentic Supervisor**: Orchestrator-managed Worker nodes (`VectorAgent`, `GeneralAgent`) for optimized inference.
+- **Multi-Tier Memory**: Episodic vector persistence, conversational sliding-window RAM, and graph-backed episodic memory via Neo4j.
+- **Advanced Semantic Router**: 4-intent classification (General, Vector, Graph, Hybrid) via parallel LLM and Vector-grounding.
+- **Agentic Supervisor**: Orchestrator-managed Worker nodes (`VectorAgent`, `GeneralAgent`, `GraphAgent`, `HybridFusion`) for optimized inference.
 - **PostgreSQL-native**: pgvector vector RAG with semantic chunking, hybrid search, and Ollama reranking.
+- **Graph RAG**: Neo4j knowledge graph with entity extraction via Graphiti, relationship-aware retrieval, and hybrid vector+graph fusion.
 
 ## Prerequisites
 
@@ -22,6 +23,11 @@ Features:
 - **PostgreSQL** with the [pgvector](https://github.com/pgvector/pgvector) extension enabled:
   ```sql
   CREATE EXTENSION IF NOT EXISTS vector;
+  ```
+- **Neo4j 5.21+** *(optional, for Graph RAG)* — install via [Neo4j Desktop](https://neo4j.com/download/) or Docker:
+  ```bash
+  docker run -d --name neo4j -p 7474:7474 -p 7687:7687 \
+    -e NEO4J_AUTH=neo4j/rag3password neo4j:5
   ```
 
 ## Installation
@@ -63,16 +69,40 @@ GROQ_MODEL=llama-3.3-70b-versatile
 
 Multiple keys enable automatic rotation when rate limits are hit.
 
+### Optional: Graph RAG (Neo4j + Graphiti)
+
+Enable the Graph RAG pipeline by setting these in `.env`:
+
+```env
+# ── Graph RAG ──────────────────────────────────────────
+GRAPH_RAG_ENABLED=true
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=rag3password
+GRAPH_BUILDER_MODEL=llama3.2
+GRAPH_SEARCH_DEPTH=2
+GRAPH_SEARCH_RESULTS=10
+HYBRID_GRAPH_WEIGHT=0.4
+```
+
+When `GRAPH_RAG_ENABLED=false` (default), the graph pipeline is completely inactive — no Neo4j connection is attempted.
+
 ## Usage
 
 ### Ingest Documents
 
 ```bash
-# Ingest a single file
+# Ingest a single file (vector + graph if GRAPH_RAG_ENABLED)
 python -m src.main ingest path/to/document.pdf
 
 # Ingest all files in a directory
 python -m src.main ingest path/to/docs/
+
+# Vector store only (skip graph)
+python -m src.main ingest path/to/document.pdf --vector
+
+# Graph store only (skip vector)
+python -m src.main ingest path/to/document.pdf --graph
 
 # Force re-parse (ignore cached JSON)
 python -m src.main ingest path/to/document.pdf --force-reparse
@@ -87,6 +117,8 @@ python -m src.main ingest path/to/document.pdf --groq
 Supported file types: `.pdf`, `.docx`, `.doc`, `.txt`, `.md`
 
 Parsed documents are cached as JSON in `parsed_docs/` to avoid re-parsing on subsequent runs.
+
+**Ingestion state tracking**: The system auto-detects which stores already have a document and skips them unless `--force-reparse` is used.
 
 ### Resuming Failed Ingestion
 
@@ -117,41 +149,63 @@ python -m src.main query "What is X?" --groq
 
 ## Core Architecture & Agentic Workflow
 
-RAG3 replaces the monolithic generation loop with a 4-part **Agentic Workflow Architecture**:
+RAG3 replaces the monolithic generation loop with a multi-agent **Agentic Workflow Architecture** supporting 4 intent types:
 
 ```mermaid
 graph TD
     User([User]) --> CLI[Interactive CLI]
-    CLI --> Session[RAGSession</br>Sliding Window RAM]
+    CLI --> Session["RAGSession\nSliding Window + Graph Memory"]
     Session --> Orch[Orchestrator]
-    
-    Orch --> Router[IntentRouter </br> Semantic + Syllabus]
-    
-    %% Router evaluating Intent
-    Router -->|General Chat| D1{Is it Trivia/Greetings?}
-    Router -->|Domain Query| D2{Is it Factual Document Extraction?}
-    
-    D1 --> GA[GeneralAgent]
-    D2 --> VA[VectorAgent / AdvancedRAGAgent]
-    
+
+    Orch --> Router["IntentRouter\n4-Tier Classification"]
+
+    Router -->|GeneralChat| GA[GeneralAgent]
+    Router -->|VectorRetrieval| VA[VectorAgent]
+    Router -->|GraphRetrieval| GrA["GraphAgent"]
+    Router -->|HybridRetrieval| HF["GraphVectorFusion"]
+
     GA --> Synth[Synthesizer]
     VA --> Synth
-    
-    Synth --> Orch
-    Orch --> Session
-    Session --> User
-    
-    %% Vector Agent Sub-Tree
-    subgraph Vector Retrieval Tools
-        VA --> FAISS[(FAISS Episodic Memory)]
+    GrA --> Synth
+    HF --> Synth
+
+    Synth --> Orch --> Session --> User
+
+    subgraph "Vector Pipeline"
         VA --> PG[(PostgreSQL + pgvector)]
     end
+
+    subgraph "Graph Pipeline"
+        GrA --> Neo[(Neo4j via Graphiti)]
+    end
+
+    subgraph "Hybrid Pipeline"
+        HF --> PG
+        HF --> Neo
+    end
+
+    subgraph "Memory"
+        Session --> FAISS[(FAISS Episodic)]
+        Session --> GraphMem[(Graph Episodic)]
+    end
 ```
+
+### Intent Routing
+
+The `IntentRouter` uses a 3-tier hierarchy (Regex → Weighted Keywords → LLM Arbiter) to classify queries:
+
+| Intent | Trigger | Worker |
+|---|---|---|
+| `GeneralChat` | Greetings, trivia, small talk | `GeneralAgent` |
+| `VectorRetrieval` | Factual queries answerable from documents | `VectorAgent` |
+| `GraphRetrieval` | Relationship / dependency / multi-hop queries | `GraphAgent` |
+| `HybridRetrieval` | Queries needing both factual context AND relational reasoning | `GraphVectorFusion` |
 
 ### Memory System
 RAG3 integrates deep conversational memory:
 - **Sliding Window:** Temporarily stores the last N messages in RAM.
-- **Episodic Persistence:** Once the sliding window fills up, older segments are summarized by an LLM and stored as vectors in a local FAISS database for long-term historical recall.
+- **Episodic Persistence (FAISS):** Once the sliding window fills up, older segments are summarized by an LLM and stored as vectors in a local FAISS database for long-term historical recall.
+- **Graph Episodic Memory (Neo4j):** When Graph RAG is enabled, the knowledge graph is also searched for entity-rich context related to the current query, augmenting FAISS-based recall.
 
 ## Optional Enhancements
 
@@ -159,6 +213,7 @@ All enhancements are disabled by default. Enable them in `.env`:
 
 | Enhancement | Flag | Description |
 |---|---|---|
+| **Graph RAG** | `GRAPH_RAG_ENABLED=true` | Neo4j knowledge graph with entity extraction, relationship-aware retrieval, and hybrid fusion |
 | Hybrid Search | `HYBRID_SEARCH_ENABLED=true` | Combines vector similarity + BM25 keyword search via RRF |
 | Contextual Retrieval | `CONTEXTUAL_RETRIEVAL_ENABLED=true` | Prepends LLM-generated context to each chunk before embedding |
 | Hierarchical Chunking | `USE_HIERARCHICAL_CHUNKING=true` | Parent/child chunks — retrieve small, send large context to LLM |
@@ -174,16 +229,17 @@ src/
 ├── config.py                        # Pydantic Settings (all config via .env)
 ├── main.py                          # CLI entry point + RAGSystem orchestrator
 ├── agents/                          # Agentic Workflow Components
-│   ├── orchestrator.py              # Central supervisor node
-│   ├── router.py                    # Advanced Semantic Intent Router
-│   ├── synthesizer.py               # Output formatter
+│   ├── orchestrator.py              # Central supervisor (Vector + Graph + Hybrid dispatch)
+│   ├── router.py                    # 4-Intent Semantic Router (General/Vector/Graph/Hybrid)
+│   ├── synthesizer.py               # Output formatter with intent-specific metadata
 │   └── workers/
 │       ├── general_agent.py         # Fast conversational LLM wrapper
-│       └── vector_agent.py          # Vector query wrapper for AdvancedRAGAgent
+│       ├── vector_agent.py          # Vector query wrapper for AdvancedRAGAgent
+│       └── graph_agent.py           # LangGraph-based graph retrieval agent
 ├── memory/                          # Conversational State
-│   ├── memory_tools.py              # Context builders
+│   ├── memory_tools.py              # Context builders (FAISS + Graph memory injection)
 │   ├── summarizer.py                # Turn-based historic summarizer
-│   └── vector_store.py              # FAISS Episodic/Archival persistence
+│   └── vector_store.py              # FAISS Episodic/Archival + GraphMemoryManager
 ├── utils/
 │   ├── llm.py                       # chat_sync() helper for Haystack generators
 │   └── groq_client.py               # RotatableGroqGenerator (key rotation + rate limits)
@@ -196,22 +252,27 @@ src/
 │   ├── hierarchical_chunker.py      # Parent/child chunk hierarchy
 │   └── embedder.py                  # OllamaTextEmbedder wrapper with caching
 ├── storage/
-│   ├── base.py                      # Abstract interfaces
-│   └── postgres/
-│       ├── vector_store.py          # PgvectorDocumentStore + hybrid search + RRF
-│       └── summary_store.py         # Summary index with pgvector
+│   ├── base.py                      # Abstract interfaces (Vector, Summary, Graph)
+│   ├── postgres/
+│   │   ├── vector_store.py          # PgvectorDocumentStore + hybrid search + RRF
+│   │   └── summary_store.py         # Summary index with pgvector
+│   └── graph/
+│       └── neo4j_store.py           # Neo4j + Graphiti wrapper (episodes, search, traversal)
 ├── retrieval/
 │   ├── agent.py                     # Haystack Agent with ReAct pattern
 │   ├── cache.py                     # Multi-level LRU cache
 │   ├── fallback.py                  # Progressive fallback strategies
+│   ├── session.py                   # RAGSession (sliding window + FAISS + graph memory)
 │   ├── tools/
-│   │   └── vector_tool.py           # Vector/hybrid search as Haystack Tool
+│   │   ├── vector_tool.py           # Vector/hybrid search as Haystack Tool
+│   │   └── graph_search_tool.py     # Graph search tool wrapping Neo4jGraphStore
 │   └── strategies/
 │       ├── reranking.py             # OllamaRanker (bge-reranker-v2-m3)
 │       ├── query_expansion.py       # LLM-based query reformulation
 │       ├── self_reflection.py       # Retrieval quality grading + refinement
 │       ├── query_router.py          # Query classification and strategy routing
-│       └── summary_index.py         # Full/topic/section summary generation
+│       ├── summary_index.py         # Full/topic/section summary generation
+│       └── graph_fusion.py          # Hybrid Vector+Graph fusion strategy
 ├── evaluation/
 │   ├── metrics.py                   # RAGAS + simple fallback metrics
 │   └── datasets.py                  # Evaluation dataset management

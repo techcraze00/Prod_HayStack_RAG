@@ -99,6 +99,21 @@ class Settings(BaseSettings):
     monitoring_enabled: bool = Field(default=False, alias="MONITORING_ENABLED")
     metrics_max_history: int = Field(default=1000, alias="METRICS_MAX_HISTORY")
 
+    # ─── Graph RAG ───────────────────────────────────────────────────
+    graph_rag_enabled: bool = Field(default=False, alias="GRAPH_RAG_ENABLED")
+    neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
+    neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
+    neo4j_password: str = Field(default="rag3password", alias="NEO4J_PASSWORD")
+    graph_builder_model: str = Field(default="llama3.2", alias="GRAPH_BUILDER_MODEL")
+    graph_search_depth: int = Field(default=2, alias="GRAPH_SEARCH_DEPTH")
+    graph_search_results: int = Field(default=10, alias="GRAPH_SEARCH_RESULTS")
+    graph_community_detection: bool = Field(
+        default=False, alias="GRAPH_COMMUNITY_DETECTION"
+    )
+    hybrid_graph_weight: float = Field(
+        default=0.4, alias="HYBRID_GRAPH_WEIGHT"
+    )
+
     class Config:
         env_file = ".env"
         case_sensitive = False

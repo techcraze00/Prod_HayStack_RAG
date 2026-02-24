@@ -1,11 +1,17 @@
 """
 3-TIER INTENT ROUTER for RAG3
-Hierarchy-based classification for Document Retrieval and General Chat.
+Hierarchy-based classification for Document Retrieval, Graph Retrieval, Hybrid Retrieval, and General Chat.
 
 Tiers:
 1. Regex (Zero Latency)
 2. Weighted Keywords (Low Latency)
 3. LLM Fallback (High Accuracy)
+
+Intents:
+- GeneralChat: greetings, small talk, trivia
+- VectorRetrieval: factual queries answerable from document chunks
+- GraphRetrieval: relationship, multi-hop, or structural queries
+- HybridRetrieval: queries needing both factual context AND relational reasoning
 """
 
 import re
@@ -44,6 +50,16 @@ class IntentRouter:
             logger.info("Matched Tier 1: Regex (GeneralChat)")
             return "GeneralChat"
 
+        # Check for hybrid patterns first (more specific, superset of graph+vector)
+        if settings.graph_rag_enabled and self._match_regex_hybrid(query_clean):
+            logger.info("Matched Tier 1: Regex (HybridRetrieval)")
+            return "HybridRetrieval"
+
+        # Check for graph-specific patterns (if graph RAG is enabled)
+        if settings.graph_rag_enabled and self._match_regex_graph(query_clean):
+            logger.info("Matched Tier 1: Regex (GraphRetrieval)")
+            return "GraphRetrieval"
+
         # --- Tier 2: Parallel Grounding Check (Vector Probe) ---
         context_snippets = ""
         if self.vector_tool:
@@ -76,8 +92,34 @@ class IntentRouter:
         greetings = r"\b(hi|hello|hey|good morning|good evening|greetings)\b"
         system = r"\b(exit|quit|bye|clear|help|reset|restart)\b"
         gibberish = r"^([asdfjkl;]{4,}|[0-9]{10,})$"
-        
+
         return any(re.search(p, query) for p in [greetings, system, gibberish])
+
+    def _match_regex_hybrid(self, query: str) -> bool:
+        """Detect queries that need BOTH factual context and relational reasoning."""
+        patterns = [
+            # "explain X and how it connects/relates to Y"
+            r"\b(explain|describe|tell me about)\b.*\b(and|also)\b.*\b(relate|connect|link|depend)\b",
+            # "what is X and its relationship with Y"
+            r"\b(what|who)\s+(is|are)\b.*\b(relationship|connection|impact)\b",
+            # "summarize X and show how it connects to Y"
+            r"\b(summarize|overview)\b.*\b(connect|relate|depend|impact)\b",
+            # "compare X and Y and their dependencies"
+            r"\b(compare|contrast)\b.*\b(depend|connect|relate)\b",
+        ]
+        return any(re.search(p, query) for p in patterns)
+
+    def _match_regex_graph(self, query: str) -> bool:
+        """Detect relationship and structural queries that benefit from graph retrieval."""
+        patterns = [
+            r"\b(how\s+(is|are|does)|what)\b.*\b(related|connected|linked|associated)\b",
+            r"\b(relationship|connection|link)\s+(between|among)\b",
+            r"\b(depends?\s+on|dependency|dependencies)\b",
+            r"\b(entities|nodes|edges)\s+(in|of|from|connected)\b",
+            r"\bwho\s+(knows|works with|reports to|collaborates)\b",
+            r"\b(graph|knowledge graph|entity graph)\b",
+        ]
+        return any(re.search(p, query) for p in patterns)
 
     def _llm_fallback(self, query: str, history: List[ChatMessage] = None, snippets: str = "") -> str:
         """Intelligent fallback utilizing Semantic Probes and Global Syllabus."""
@@ -94,10 +136,27 @@ class IntentRouter:
                     content = msg_text[:200] if msg_text else ""
                     history_context += f"{role}: {content}\n"
 
+            # Build category options based on whether Graph RAG is enabled
+            graph_category = ""
+            hybrid_category = ""
+            num_categories = "two"
+            if settings.graph_rag_enabled:
+                num_categories = "four"
+                graph_category = """
+3. **'GraphRetrieval'**
+   - **Trigger:** The query asks about relationships, connections, or dependencies between entities. Multi-hop reasoning is needed (e.g., "What connects X to Y?"). Temporal or structural questions about how things relate.
+   - **Example:** "How is X related to Y?", "What entities are connected to Z?", "What are the dependencies of the auth module?", "How has the policy changed over time?"
+"""
+                hybrid_category = """
+4. **'HybridRetrieval'**
+   - **Trigger:** The query requires BOTH factual context from documents AND relationship/structural reasoning from the knowledge graph. The user wants to understand something AND how it connects to other things.
+   - **Example:** "Explain X and how it relates to Y", "What is X and its impact on Y?", "Summarize the findings and show the dependencies", "Compare X and Y and their connections"
+"""
+
             system_prompt = f"""You are the Advanced Semantic Router for an Enterprise RAG System.
 Your job is to objectively evaluate the user's query against the known database contents and route it appropriately.
 
-You have exactly two categories. You must respond with ONLY the category name. No punctuation or explanation.
+You have {num_categories} categories. You must respond with ONLY the category name. No punctuation or explanation.
 {history_context}
 
 ### GLOBAL DATABASE SYLLABUS
@@ -108,16 +167,16 @@ We performed a live test search against the database for the user's query. Here 
 {snippets}
 
 ### TASK
-Based on the syllabus and the vector probe results, does the user's query `{query}` attempt to extract factual knowledge embedded in this specific database, or is it a general conversational/trivia query? 
+Based on the syllabus and the vector probe results, classify the user's query `{query}`.
 
 1. **'VectorRetrieval'**
-- **Trigger:** The query requests facts and the vector probe returned highly relevant snippets, OR the topic heavily aligns with the Syllabus constraints.
-- **Example:** "How do I configure the server?", "Who is the CEO?", "Summarize the findings."
+   - **Trigger:** The query requests facts and the vector probe returned highly relevant snippets, OR the topic heavily aligns with the Syllabus constraints.
+   - **Example:** "How do I configure the server?", "Who is the CEO?", "Summarize the findings."
 
 2. **'GeneralChat'**
-- **Trigger:** The query is general trivia ("What is the capital of France?"), small talk, or abstract logic. Even if they use the word "What", if the Vector Probe results are irrelevant and it ignores the Syllabus, it is GeneralChat.
-- **Example:** "What is the capital of France?", "Hi", "Tell me a joke."
-"""
+   - **Trigger:** The query is general trivia ("What is the capital of France?"), small talk, or abstract logic. Even if they use the word "What", if the Vector Probe results are irrelevant and it ignores the Syllabus, it is GeneralChat.
+   - **Example:** "What is the capital of France?", "Hi", "Tell me a joke."
+{graph_category}{hybrid_category}"""
 
             messages = [
                 ChatMessage.from_system(system_prompt),
@@ -126,17 +185,21 @@ Based on the syllabus and the vector probe results, does the user's query `{quer
 
             response = self.llm.run(messages=messages)
             raw_response = response["replies"][0].text
-            
+
             # Sanitize output
-            intent = raw_response.strip().replace("'", "").replace('"', "").replace(".", "")
-            
-            if intent.lower() == "generalchat":
+            intent = raw_response.strip().replace("'", "").replace('"', "").replace(".", "").lower()
+
+            if intent == "generalchat":
                 return "GeneralChat"
-            return "VectorRetrieval" # Safer default
-            
+            elif intent == "hybridretrieval" and settings.graph_rag_enabled:
+                return "HybridRetrieval"
+            elif intent == "graphretrieval" and settings.graph_rag_enabled:
+                return "GraphRetrieval"
+            return "VectorRetrieval"  # Safer default
+
         except Exception as e:
             logger.error(f"Router Tier 3 Error: {e}")
-            return "VectorRetrieval" # Safe default
+            return "VectorRetrieval"  # Safe default
 
 def classify_intent(query: str, history: list = None, model: str = None, vector_tool=None, syllabus: str = None) -> str:
     """Functional wrapper. Returns the primary intent."""

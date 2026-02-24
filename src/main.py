@@ -5,6 +5,7 @@ CLI entry point and RAGSystem orchestrator class.
 """
 
 import argparse
+import asyncio
 import os
 from pathlib import Path
 
@@ -161,7 +162,7 @@ class RAGSystem:
         )
 
     def _initialize_storage(self):
-        """Initialize PostgreSQL storage."""
+        """Initialize PostgreSQL storage and optionally Neo4j graph store."""
         console.print("[dim]Storage backend: postgres[/dim]")
 
         self.vector_store = PostgresVectorStore(
@@ -177,6 +178,33 @@ class RAGSystem:
             ollama_base_url=settings.ollama_base_url,
             table_name=settings.postgres_summary_table,
         )
+
+        # Initialize Graph Store (lazy, behind feature flag)
+        self.graph_store = None
+        if settings.graph_rag_enabled:
+            try:
+                from src.storage.graph import Neo4jGraphStore
+
+                groq_key = settings.groq_api_keys[0] if self.use_groq and settings.groq_api_keys else None
+                self.graph_store = Neo4jGraphStore(
+                    uri=settings.neo4j_uri,
+                    user=settings.neo4j_user,
+                    password=settings.neo4j_password,
+                    model=(
+                        settings.groq_model if self.use_groq
+                        else settings.graph_builder_model
+                    ),
+                    use_groq=self.use_groq,
+                    groq_api_key=groq_key,
+                )
+                if self.graph_store.verify_connectivity():
+                    console.print("[dim]Graph storage: Neo4j ✓[/dim]")
+                else:
+                    console.print("[yellow]Graph storage: Neo4j not reachable — graph features disabled[/yellow]")
+                    self.graph_store = None
+            except Exception as e:
+                console.print(f"[yellow]Graph store init failed: {e} — graph features disabled[/yellow]")
+                self.graph_store = None
 
     def _create_agent(self) -> AdvancedRAGAgent:
         """Create agent with tool configuration."""
@@ -195,25 +223,89 @@ class RAGSystem:
             console.print(f"[yellow]Warning: Could not check summary cache: {e}[/yellow]")
             return False
 
+    def _check_vector_ingested(self, source: str) -> bool:
+        """Check if a document has already been ingested into the vector store."""
+        try:
+            from haystack_integrations.document_stores.pgvector import PgvectorDocumentStore
+            count = self.vector_store._store.count_documents(
+                filters={"field": "meta.source", "operator": "==", "value": source}
+            )
+            return count > 0
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not check vector ingestion state: {e}[/yellow]")
+            return False
+
+    def _check_graph_ingested(self, source: str) -> bool:
+        """Check if a document has already been ingested into the graph store."""
+        if not self.graph_store:
+            return False
+        try:
+            return self.graph_store.is_document_ingested(source)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not check graph ingestion state: {e}[/yellow]")
+            return False
+
     def ingest_document(
         self,
         file_path: str,
         force_reparse: bool = False,
         force_regenerate_summary: bool = False,
         chunks_only: bool = False,
+        ingest_vector: bool = True,
+        ingest_graph: bool = True,
     ):
         """Ingest a single document with intelligent caching.
 
         Pipeline: Parse → Consolidate → Chunk → Save chunks JSON → Summarize → Store to PG
+                                                                            → Build Graph → Store to Neo4j
 
-        If any step after chunking fails, re-run with --chunks-only to resume
-        from the saved chunks JSON without re-parsing or re-embedding.
+        Selective ingestion:
+        - --vector: vector store only
+        - --graph: graph store only
+        - Neither flag (default): both stores
+
+        Ingestion state tracking skips stores where the document already exists,
+        unless --force-reparse is set.
         """
         file_path = Path(file_path)
+        source_str = str(file_path)
+
+        # ── Determine which stores to target ─────────────────────
+        do_vector = ingest_vector
+        do_graph = ingest_graph and self.graph_store is not None
+
+        # Ingestion state tracking (skip existing unless force-reparse)
+        if not force_reparse:
+            if do_vector and self._check_vector_ingested(source_str):
+                console.print(
+                    f"  [green]\u2713[/green] [dim]{file_path.name} already in vector store — skipping[/dim]"
+                )
+                do_vector = False
+
+            if do_graph and self._check_graph_ingested(source_str):
+                console.print(
+                    f"  [green]\u2713[/green] [dim]{file_path.name} already in graph store — skipping[/dim]"
+                )
+                do_graph = False
+
+        if not do_vector and not do_graph:
+            console.print(
+                f"[green]\u2713[/green] {file_path.name}: already ingested in all target stores. "
+                f"Use --force-reparse to re-ingest."
+            )
+            return
+
+        # Build target label for logging
+        targets = []
+        if do_vector:
+            targets.append("Vector")
+        if do_graph:
+            targets.append("Graph")
+        target_label = " + ".join(targets)
 
         console.print(
             f"[bold blue]Ingesting:[/bold blue] {file_path} "
-            f"[dim](Vector)[/dim]"
+            f"[dim]({target_label})[/dim]"
         )
 
         with Progress(
@@ -245,18 +337,18 @@ class RAGSystem:
                     f"  [green]\u2713[/green] [dim]Loaded {len(chunk_dicts)} saved chunks from: {chunks_path.name}[/dim]"
                 )
 
-                progress.update(task, description="Storing in vector database...")
-                result = self.vector_store.add_chunks(chunk_dicts)
-                console.print(
-                    f"  [green]\u2713[/green] [dim]Added {result['added']} chunks "
-                    f"({result.get('failed', 0)} failed)[/dim]"
-                )
+                if do_vector:
+                    progress.update(task, description="Storing in vector database...")
+                    result = self.vector_store.add_chunks(chunk_dicts)
+                    console.print(
+                        f"  [green]\u2713[/green] [dim]Added {result['added']} chunks "
+                        f"({result.get('failed', 0)} failed)[/dim]"
+                    )
 
                 progress.update(task, completed=True, description="Done!")
 
                 console.print(
-                    f"[green]\u2713[/green] Resumed ingestion for {file_path.name}: "
-                    f"{result['added']} chunks stored"
+                    f"[green]\u2713[/green] Resumed ingestion for {file_path.name}"
                 )
                 return
 
@@ -337,8 +429,8 @@ class RAGSystem:
             )
 
             # Generate summaries (with caching)
-            if self.summary_strategy:
-                doc_id = str(file_path)
+            if do_vector and self.summary_strategy:
+                doc_id = source_str
                 summaries_exist = self._check_summaries_exist(doc_id)
 
                 if summaries_exist and not force_regenerate_summary:
@@ -369,18 +461,68 @@ class RAGSystem:
                                 f"  [yellow]\u26a0[/yellow] [dim]Summary generation failed: {e}[/dim]"
                             )
 
-            # Vector ingestion (batched)
-            progress.update(task, description="Storing in vector database...")
-            result = self.vector_store.add_chunks(chunk_dicts)
-            console.print(
-                f"  [green]\u2713[/green] [dim]Added {result['added']} chunks "
-                f"({result.get('failed', 0)} failed)[/dim]"
-            )
+            # ── Vector ingestion (batched) ───────────────────────────
+            vector_added = 0
+            if do_vector:
+                progress.update(task, description="Storing in vector database...")
+                result = self.vector_store.add_chunks(chunk_dicts)
+                vector_added = result['added']
+                console.print(
+                    f"  [green]\u2713[/green] [dim]Vector: added {result['added']} chunks "
+                    f"({result.get('failed', 0)} failed)[/dim]"
+                )
+
+            # ── Graph ingestion ──────────────────────────────────────
+            graph_episodes = 0
+            if do_graph:
+                progress.update(task, description="Building knowledge graph...")
+                group_id = str(uuid.uuid4())
+
+                for i, element in enumerate(consolidated):
+                    if not element.content.strip():
+                        continue
+
+                    progress.update(
+                        task,
+                        description=f"Building graph ({i+1}/{len(consolidated)} sections)...",
+                    )
+
+                    episode_result = asyncio.run(
+                        self.graph_store.add_episode(
+                            text=element.content,
+                            source_metadata={
+                                "source": source_str,
+                                "page": element.page_number,
+                                "type": element.element_type,
+                                "section": element.metadata.get("section", ""),
+                                "group_id": group_id,
+                            },
+                        )
+                    )
+
+                    if episode_result.get("status") == "success":
+                        graph_episodes += 1
+                    else:
+                        console.print(
+                            f"  [yellow]\u26a0[/yellow] [dim]Graph episode failed for section {i+1}: "
+                            f"{episode_result.get('error', 'unknown')}[/dim]"
+                        )
+
+                console.print(
+                    f"  [green]\u2713[/green] [dim]Graph: built {graph_episodes} episodes from "
+                    f"{len(consolidated)} sections[/dim]"
+                )
 
             progress.update(task, completed=True, description="Done!")
 
+        # Final summary
+        parts = []
+        if do_vector:
+            parts.append(f"{vector_added} vector chunks")
+        if do_graph:
+            parts.append(f"{graph_episodes} graph episodes")
         console.print(
-            f"[green]\u2713[/green] Ingested from {file_path.name}: {result['added']} chunks"
+            f"[green]\u2713[/green] Ingested {file_path.name}: {', '.join(parts)}"
         )
 
     def ingest_directory(
@@ -389,6 +531,8 @@ class RAGSystem:
         force_reparse: bool = False,
         force_regenerate_summary: bool = False,
         chunks_only: bool = False,
+        ingest_vector: bool = True,
+        ingest_graph: bool = True,
     ):
         """Ingest all documents in a directory."""
         dir_path = Path(dir_path)
@@ -410,24 +554,38 @@ class RAGSystem:
                 force_reparse=force_reparse,
                 force_regenerate_summary=force_regenerate_summary,
                 chunks_only=chunks_only,
+                ingest_vector=ingest_vector,
+                ingest_graph=ingest_graph,
             )
 
     def query_interactive(self):
         """Interactive query mode with Conversation Memory."""
         from src.retrieval.session import RAGSession
         from src.agents.orchestrator import Orchestrator
-        
-        rag_agent = self._create_agent()
-        orchestrator = Orchestrator(rag_agent=rag_agent)
-        session_id = str(uuid.uuid4())[:8]
-        session = RAGSession(session_id=session_id)
 
+        rag_agent = self._create_agent()
+
+        # Build GraphSearchTool if graph store is available
+        graph_search_tool = None
+        if self.graph_store:
+            from src.retrieval.tools.graph_search_tool import GraphSearchTool
+            graph_search_tool = GraphSearchTool(graph_store=self.graph_store)
+
+        orchestrator = Orchestrator(
+            rag_agent=rag_agent,
+            graph_search_tool=graph_search_tool,
+        )
+        session_id = str(uuid.uuid4())[:8]
+        session = RAGSession(session_id=session_id, graph_store=self.graph_store)
+
+        graph_status = "\u2713" if graph_search_tool else "\u2717"
         console.print(
             Panel(
                 f"[bold]RAG3 System[/bold]\n\n"
                 f"Session ID: {session_id}\n"
                 f"Memory: \u2713\n"
-                f"Vector Search: \u2713\n\n"
+                f"Vector Search: \u2713\n"
+                f"Graph Search: {graph_status}\n\n"
                 f"Type 'exit' to quit.",
                 title="Interactive Mode",
                 border_style="blue",
@@ -557,6 +715,16 @@ def main():
         action="store_true",
         help="Resume from saved chunks JSON (skip parsing, chunking, summaries)",
     )
+    ingest_parser.add_argument(
+        "--vector",
+        action="store_true",
+        help="Ingest into vector store only (skip graph)",
+    )
+    ingest_parser.add_argument(
+        "--graph",
+        action="store_true",
+        help="Ingest into graph store only (skip vector)",
+    )
 
     # Query command
     query_parser = subparsers.add_parser(
@@ -582,12 +750,27 @@ def main():
 
     if args.command == "ingest":
         path = Path(args.path)
+
+        # Determine ingestion targets
+        # If neither --vector nor --graph is specified, default to both
+        flag_vector = getattr(args, "vector", False)
+        flag_graph = getattr(args, "graph", False)
+        if not flag_vector and not flag_graph:
+            # Default: both
+            ingest_vector = True
+            ingest_graph = True
+        else:
+            ingest_vector = flag_vector
+            ingest_graph = flag_graph
+
         if path.is_dir():
             system.ingest_directory(
                 str(path),
                 force_reparse=args.force_reparse,
                 force_regenerate_summary=args.force_regenerate_summary,
                 chunks_only=args.chunks_only,
+                ingest_vector=ingest_vector,
+                ingest_graph=ingest_graph,
             )
         else:
             system.ingest_document(
@@ -595,6 +778,8 @@ def main():
                 force_reparse=args.force_reparse,
                 force_regenerate_summary=args.force_regenerate_summary,
                 chunks_only=args.chunks_only,
+                ingest_vector=ingest_vector,
+                ingest_graph=ingest_graph,
             )
 
     elif args.command == "query":

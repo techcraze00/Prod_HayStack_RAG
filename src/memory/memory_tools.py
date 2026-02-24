@@ -13,7 +13,7 @@ Usage:
 
 from typing import List, Dict, Any
 
-def get_context_injection(core_memory: str = "", negative_constraints: List[str] = None, episodic_context: str = "", archival_context: str = "") -> str:
+def get_context_injection(core_memory: str = "", negative_constraints: List[str] = None, episodic_context: str = "", archival_context: str = "", graph_episodic_context: str = "") -> str:
     """Formats Core Memory, Negative Constraints, and RAG contexts for prompt insertion."""
     neg = negative_constraints or []
 
@@ -46,6 +46,10 @@ def get_context_injection(core_memory: str = "", negative_constraints: List[str]
     if archival_context:
 
         injection += f"\n### Successful Patterns/Code Found:\n{archival_context}\n"
+
+    if graph_episodic_context:
+
+        injection += f"\n### Graph Memory (Knowledge Graph Recall):\n{graph_episodic_context}\n"
 
             
 

@@ -7,5 +7,5 @@ __pycache__/
 *.egg-info/
 .claude
 ignore/
-
+tests/
 SESSION.md

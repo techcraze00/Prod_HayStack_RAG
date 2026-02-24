@@ -147,3 +147,100 @@ class FAISSManager:
             import shutil
             shutil.rmtree(self.index_path)
         self.vector_store = self._load_or_create_index()
+
+
+class GraphMemoryManager:
+    """
+    Graph-backed episodic memory manager.
+
+    Wraps Neo4jGraphStore for memory-specific retrieval:
+    - Searches the knowledge graph for entities/facts related to the current query
+    - Returns formatted memory context for injection into agent prompts
+    - Optionally stores conversation episodes into the graph for long-term recall
+
+    Usage:
+    - Initialized in RAGSession when graph_rag_enabled and a graph_store is available
+    - Called by session.get_memory_context() to augment FAISS episodic memory
+    """
+
+    def __init__(self, graph_store):
+        """
+        Args:
+            graph_store: Neo4jGraphStore instance (must implement GraphStoreInterface).
+        """
+        self.graph_store = graph_store
+
+    def search(self, query: str, k: int = 3) -> List[Dict[str, Any]]:
+        """
+        Search the knowledge graph for facts/entities related to the query.
+
+        Args:
+            query: Search query string.
+            k: Number of results to return.
+
+        Returns:
+            List of result dicts with 'content' and 'metadata' keys
+            (same format as FAISSManager.search for compatibility).
+        """
+        import asyncio
+
+        try:
+            results = asyncio.run(self.graph_store.search(query=query, num_results=k))
+
+            # Convert to FAISSManager-compatible format
+            formatted = []
+            for r in results:
+                content = r.get("content", "")
+                source_node = r.get("source_node", "")
+                target_node = r.get("target_node", "")
+
+                # Build a readable content string
+                if source_node and target_node:
+                    display = f"{source_node} → {target_node}: {content}"
+                else:
+                    display = content
+
+                formatted.append({
+                    "content": display,
+                    "metadata": {
+                        "source": "knowledge_graph",
+                        "source_node": source_node,
+                        "target_node": target_node,
+                        **r.get("metadata", {}),
+                    }
+                })
+
+            return formatted
+
+        except Exception as e:
+            logger.error(f"Graph memory search failed: {e}")
+            return []
+
+    def add_to_graph(self, text: str, metadata: Dict[str, Any] = None) -> None:
+        """
+        Store a conversation episode into the knowledge graph.
+
+        This allows the graph to learn from conversations over time,
+        building a temporal knowledge base of user interactions.
+
+        Args:
+            text: The text content to store (e.g. conversation summary).
+            metadata: Additional metadata (session_id, type, etc.).
+        """
+        import asyncio
+
+        try:
+            source_metadata = {
+                "source": "conversation_memory",
+                "type": "episodic",
+                **(metadata or {}),
+            }
+            asyncio.run(
+                self.graph_store.add_episode(
+                    text=text,
+                    source_metadata=source_metadata,
+                )
+            )
+            logger.info(f"Added conversation episode to graph memory.")
+        except Exception as e:
+            logger.error(f"Failed to add episode to graph memory: {e}")

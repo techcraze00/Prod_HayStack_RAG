@@ -1,5 +1,5 @@
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
 from ..config import settings
@@ -11,15 +11,26 @@ logger = logging.getLogger(__name__)
 class RAGSession:
     """
     Session manager containing Sliding Window history and memory integration points.
+    Supports both FAISS episodic memory and optional graph-backed episodic memory.
     """
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, graph_store=None):
         self.session_id = session_id
         self.chat_history: List[BaseMessage] = []
         self.max_window = settings.memory_window_size if hasattr(settings, "memory_window_size") else 10
         
-        # Load Long-Term Memories
+        # Load Long-Term Memories (FAISS)
         self.episodic_memory = FAISSManager("episodic", session_id=session_id)
         self.archival_memory = FAISSManager("archival", session_id=session_id)
+        
+        # Graph-backed episodic memory (optional, behind feature flag)
+        self.graph_memory = None
+        if settings.graph_rag_enabled and graph_store is not None:
+            try:
+                from src.memory.vector_store import GraphMemoryManager
+                self.graph_memory = GraphMemoryManager(graph_store=graph_store)
+                logger.info("Graph episodic memory initialized for session.")
+            except Exception as e:
+                logger.warning(f"Graph memory init failed: {e}")
         
         # Short Term Facts
         self.core_memory = ""
@@ -54,16 +65,33 @@ class RAGSession:
             context += f"- {r['content']}\n"
         return context
 
+    def retrieve_graph_episodic(self, query: str, top_k: int = 3) -> str:
+        """Find graph-based knowledge related to current query."""
+        if not self.graph_memory:
+            return ""
+
+        results = self.graph_memory.search(query, k=top_k)
+        if not results:
+            return ""
+
+        context = "Knowledge Graph Recall:\n"
+        for r in results:
+            context += f"- {r['content']}\n"
+        return context
+
     def get_memory_context(self, current_query: str) -> str:
         """Return formatted memory injections for the agent's prompt"""
         from src.memory.memory_tools import get_context_injection
         
         episodic_context = self.retrieve_episodic(current_query)
+        graph_episodic_context = self.retrieve_graph_episodic(current_query)
         # Note: archival retrieval could be added here if needed
         
         return get_context_injection(
             core_memory=self.core_memory,
             negative_constraints=self.negative_constraints,
             episodic_context=episodic_context,
-            archival_context=""
+            archival_context="",
+            graph_episodic_context=graph_episodic_context,
         )
+

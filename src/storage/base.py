@@ -37,3 +37,30 @@ class SummaryStoreInterface(ABC):
     def search_summaries(self, query: str, top_k: int) -> List[Dict[str, Any]]:
         """Search summaries"""
         pass
+
+
+class GraphStoreInterface(ABC):
+    """Abstract interface for graph-based knowledge storage"""
+
+    @abstractmethod
+    async def add_episode(
+        self, text: str, source_metadata: Dict[str, Any], reference_time: str = None
+    ) -> Dict[str, Any]:
+        """Add a text episode to the knowledge graph (entity extraction + edge creation)"""
+        pass
+
+    @abstractmethod
+    async def search(self, query: str, num_results: int = 10) -> List[Dict[str, Any]]:
+        """Search the knowledge graph"""
+        pass
+
+    @abstractmethod
+    def is_document_ingested(self, source: str) -> bool:
+        """Check if a document has already been ingested into the graph"""
+        pass
+
+    @abstractmethod
+    async def close(self):
+        """Close the graph store connection"""
+        pass
+
