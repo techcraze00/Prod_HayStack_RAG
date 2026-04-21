@@ -174,7 +174,7 @@ python -m src.main query "What is X?" --groq
 RAG3 replaces the monolithic generation loop with a multi-agent **Agentic Workflow Architecture** supporting 4 intent types:
 
 <div align="center">
-  <img src="./public/rag-architecture-neon.svg" alt="RAG Architecture Diagram" width="100%">
+  <img src="./public/architecture-neon.svg" alt="RAG Architecture Diagram" width="100%">
 </div>
 
 ### Intent Routing
