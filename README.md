@@ -1,4 +1,4 @@
-# RAG3
+# Advanced Agentic RAG
 
 Production Retrieval-Augmented Generation system built with an **Agentic Workflow Architecture** on [Haystack](https://haystack.deepset.ai/) (v2.x), with a full **Graph RAG** pipeline powered by Neo4j + Graphiti.
 
