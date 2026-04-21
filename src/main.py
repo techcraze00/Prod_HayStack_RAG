@@ -6,8 +6,11 @@ CLI entry point and RAGSystem orchestrator class.
 
 import argparse
 import asyncio
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Workaround for macOS OpenMP multiple initialization error caused by faiss-cpu
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -16,6 +19,13 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 import json
 import uuid
+
+try:
+    from langsmith import traceable
+except ImportError:
+    def traceable(*args, **kwargs):
+        def decorator(fn): return fn
+        return args[0] if args and callable(args[0]) else decorator
 
 from src.config import settings
 from src.ingestion.unstructured_parser import DocumentParser, ParsedElement
@@ -29,6 +39,12 @@ from src.retrieval.strategies.summary_index import SummaryIndexStrategy
 from src.storage.postgres import PostgresVectorStore, PostgresSummaryStore
 
 console = Console()
+
+
+# ─── Security Constants ───────────────────────────────────────────
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md"}
+MAX_FILE_SIZE_MB = 50
+MAX_QUERY_LENGTH = 2000
 
 
 class RAGSystem:
@@ -180,13 +196,15 @@ class RAGSystem:
         )
 
         # Initialize Graph Store (lazy, behind feature flag)
+        # Strategy: Try Neo4j first, fallback to PostgresGraphStore
         self.graph_store = None
         if settings.graph_rag_enabled:
+            # Attempt Neo4j
             try:
                 from src.storage.graph import Neo4jGraphStore
 
                 groq_key = settings.groq_api_keys[0] if self.use_groq and settings.groq_api_keys else None
-                self.graph_store = Neo4jGraphStore(
+                neo4j_store = Neo4jGraphStore(
                     uri=settings.neo4j_uri,
                     user=settings.neo4j_user,
                     password=settings.neo4j_password,
@@ -197,14 +215,26 @@ class RAGSystem:
                     use_groq=self.use_groq,
                     groq_api_key=groq_key,
                 )
-                if self.graph_store.verify_connectivity():
+                if neo4j_store.verify_connectivity():
+                    self.graph_store = neo4j_store
                     console.print("[dim]Graph storage: Neo4j ✓[/dim]")
                 else:
-                    console.print("[yellow]Graph storage: Neo4j not reachable — graph features disabled[/yellow]")
-                    self.graph_store = None
+                    console.print("[yellow]Graph storage: Neo4j not reachable — falling back to PostgresGraphStore[/yellow]")
             except Exception as e:
-                console.print(f"[yellow]Graph store init failed: {e} — graph features disabled[/yellow]")
-                self.graph_store = None
+                console.print(f"[yellow]Neo4j init failed: {e} — falling back to PostgresGraphStore[/yellow]")
+
+            # Fallback: PostgresGraphStore
+            if self.graph_store is None:
+                try:
+                    from src.storage.postgres import PostgresGraphStore
+                    self.graph_store = PostgresGraphStore(
+                        connection_string=settings.postgres_uri,
+                        generator=self.generator,
+                    )
+                    console.print("[dim]Graph storage: PostgresGraphStore (fallback) ✓[/dim]")
+                except Exception as e:
+                    console.print(f"[yellow]PostgresGraphStore init failed: {e} — graph features disabled[/yellow]")
+                    self.graph_store = None
 
     def _create_agent(self) -> AdvancedRAGAgent:
         """Create agent with tool configuration."""
@@ -245,6 +275,37 @@ class RAGSystem:
             console.print(f"[yellow]Warning: Could not check graph ingestion state: {e}[/yellow]")
             return False
 
+    def _validate_file_path(self, file_path: str) -> Path:
+        """Validate and sanitize ingestion file paths (VA-04/VULN-003).
+
+        Security checks:
+        1. Resolve to absolute path (prevents ../ traversal)
+        2. Extension whitelist
+        3. File size limit
+        """
+        resolved = Path(file_path).resolve()
+
+        # Check extension
+        if resolved.suffix.lower() not in ALLOWED_EXTENSIONS:
+            raise ValueError(
+                f"Unsupported file type: '{resolved.suffix}'. "
+                f"Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            )
+
+        # Check existence
+        if not resolved.exists():
+            raise FileNotFoundError(f"File not found: {resolved}")
+
+        # Check file size
+        size_mb = resolved.stat().st_size / (1024 * 1024)
+        if size_mb > MAX_FILE_SIZE_MB:
+            raise ValueError(
+                f"File too large: {size_mb:.1f}MB (max {MAX_FILE_SIZE_MB}MB)"
+            )
+
+        return resolved
+
+    @traceable(name="RAGSystem.ingest_document", run_type="chain")
     def ingest_document(
         self,
         file_path: str,
@@ -267,7 +328,7 @@ class RAGSystem:
         Ingestion state tracking skips stores where the document already exists,
         unless --force-reparse is set.
         """
-        file_path = Path(file_path)
+        file_path = self._validate_file_path(file_path)
         source_str = str(file_path)
 
         # ── Determine which stores to target ─────────────────────
@@ -569,7 +630,10 @@ class RAGSystem:
         graph_search_tool = None
         if self.graph_store:
             from src.retrieval.tools.graph_search_tool import GraphSearchTool
-            graph_search_tool = GraphSearchTool(graph_store=self.graph_store)
+            graph_search_tool = GraphSearchTool(
+                graph_store=self.graph_store,
+                generator=self.generator,
+            )
 
         orchestrator = Orchestrator(
             rag_agent=rag_agent,
@@ -600,6 +664,11 @@ class RAGSystem:
                     break
 
                 if not question.strip():
+                    continue
+
+                # Security: enforce query length limit (VA-05)
+                if len(question) > MAX_QUERY_LENGTH:
+                    console.print(f"[yellow]Query too long ({len(question)} chars, max {MAX_QUERY_LENGTH}). Please shorten it.[/yellow]")
                     continue
 
                 with Progress(
@@ -636,11 +705,12 @@ class RAGSystem:
             except KeyboardInterrupt:
                 break
             except Exception as e:
+                # Security: log full exception server-side, show generic message to user (VA-07)
+                logger.exception("Error processing query")
                 console.print(
                     Panel(
-                        f"[red]Error processing query:[/red] {e}\n\n"
-                        "[dim]The model may have failed to call tools correctly. "
-                        "Try rephrasing your question or using a different model.[/dim]",
+                        "[red]An error occurred while processing your query.[/red]\n\n"
+                        "[dim]Try rephrasing your question or using a different model.[/dim]",
                         title="[red]\u26a0 Error[/red]",
                         border_style="red",
                     )
@@ -650,6 +720,10 @@ class RAGSystem:
 
     def query_single(self, question: str):
         """Single query mode."""
+        # Security: enforce query length limit (VA-05)
+        if len(question) > MAX_QUERY_LENGTH:
+            console.print(f"[red]Query too long ({len(question)} chars, max {MAX_QUERY_LENGTH}).[/red]")
+            return
         agent = self._create_agent()
 
         with Progress(

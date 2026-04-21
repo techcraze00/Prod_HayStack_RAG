@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 
 class VectorStoreInterface(ABC):
@@ -12,7 +12,7 @@ class VectorStoreInterface(ABC):
 
     @abstractmethod
     def search(
-        self, query_embedding: List[float], top_k: int
+        self, query_embedding: List[float], top_k: int, filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """Search for similar vectors"""
         pass
@@ -52,6 +52,13 @@ class GraphStoreInterface(ABC):
     @abstractmethod
     async def search(self, query: str, num_results: int = 10) -> List[Dict[str, Any]]:
         """Search the knowledge graph"""
+        pass
+
+    @abstractmethod
+    async def get_entity_neighborhood(
+        self, entity_name: str, depth: int = 2
+    ) -> List[Dict[str, Any]]:
+        """Retrieve the local neighborhood of an entity up to the specified depth."""
         pass
 
     @abstractmethod

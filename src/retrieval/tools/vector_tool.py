@@ -1,5 +1,12 @@
 from typing import List, Dict, Any, Optional
 
+try:
+    from langsmith import traceable
+except ImportError:
+    def traceable(*args, **kwargs):
+        def decorator(fn): return fn
+        return args[0] if args and callable(args[0]) else decorator
+
 from ...storage.base import VectorStoreInterface
 from ...config import settings
 
@@ -23,6 +30,7 @@ class VectorSearchTool:
         self.embedder = embedder
         self.cache = cache  # Optional RAGCache instance
 
+    @traceable(name="VectorSearchTool.search", run_type="retriever")
     def search(
         self,
         query: str,
@@ -65,13 +73,24 @@ class VectorSearchTool:
         results = []
 
         if use_hybrid and hasattr(self.vector_store, "hybrid_search"):
-            results = self.vector_store.hybrid_search(
-                query,
-                top_k=top_k,
-                vector_weight=settings.hybrid_vector_weight,
-                bm25_weight=settings.hybrid_bm25_weight,
-                retrieval_k=settings.hybrid_retrieval_k,
-            )
+            # Use filtered variant when metadata filters are provided
+            if filters and hasattr(self.vector_store, "hybrid_search_with_filter"):
+                results = self.vector_store.hybrid_search_with_filter(
+                    query,
+                    top_k=top_k,
+                    filters=filters,
+                    vector_weight=settings.hybrid_vector_weight,
+                    bm25_weight=settings.hybrid_bm25_weight,
+                    retrieval_k=settings.hybrid_retrieval_k,
+                )
+            else:
+                results = self.vector_store.hybrid_search(
+                    query,
+                    top_k=top_k,
+                    vector_weight=settings.hybrid_vector_weight,
+                    bm25_weight=settings.hybrid_bm25_weight,
+                    retrieval_k=settings.hybrid_retrieval_k,
+                )
         else:
             query_embedding = self.embedder.embed_text(query)
             results = self.vector_store.search(query_embedding, top_k)

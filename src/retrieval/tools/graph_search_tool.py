@@ -7,16 +7,21 @@ Provides both direct Python API and Haystack Tool interface.
 Features:
 - Hybrid graph search (semantic + keyword + graph traversal via Graphiti)
 - Entity neighborhood expansion
+- Temporal resolution (relative time → absolute dates)
 - Formatted context output for LLM consumption
 - Haystack Tool wrapper for Agent compatibility
 """
 
 import asyncio
+import json
 import logging
+import re
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 from ...storage.base import GraphStoreInterface
 from ...config import settings
+from ...utils.llm import chat_sync
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +33,43 @@ class GraphSearchTool:
     Supports:
     - Semantic + structural graph search via Graphiti
     - Entity neighborhood expansion via APOC
+    - Temporal context resolution (LLM-based)
     - Context formatting for LLM consumption
     """
 
-    def __init__(self, graph_store: GraphStoreInterface):
+    def __init__(self, graph_store: GraphStoreInterface, generator=None):
         self.graph_store = graph_store
+        self.generator = generator
+
+    def _resolve_temporal_context(self, query: str) -> str:
+        """Identifies temporal references and appends absolute dates to the query."""
+        if self.generator is None:
+            return query
+
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        prompt = f"""Current date: {current_date}
+        Extract temporal references from this question and convert to specific values.
+        Question: {query}
+        Examples: "last year" -> ["2023"], "in 2020" -> ["2020"]
+        Return ONLY a JSON array of strings: ["term1", "term2"]"""
+
+        try:
+            response = chat_sync(
+                self.generator,
+                system="You are a temporal extraction expert.",
+                user=prompt,
+            )
+            # Use regex to robustly find JSON array
+            match = re.search(r'\[.*\]', response, re.DOTALL)
+            if not match:
+                raise ValueError("No JSON array found in response.")
+            terms = json.loads(match.group(0))
+
+            if isinstance(terms, list) and terms:
+                return query + " | Time context: " + ", ".join(terms)
+        except Exception as e:
+            logger.debug(f"Temporal resolution failed: {e}")
+        return query
 
     def search(
         self,
@@ -43,6 +80,7 @@ class GraphSearchTool:
         Search the knowledge graph using Graphiti's hybrid retrieval.
 
         Combines semantic similarity, keyword matching, and graph structure.
+        Applies temporal resolution to enrich queries with absolute date context.
 
         Args:
             query: Search query string.
@@ -53,9 +91,12 @@ class GraphSearchTool:
         """
         num_results = num_results or settings.graph_search_results
 
+        # Resolve temporal references before graph search
+        enriched_query = self._resolve_temporal_context(query)
+
         try:
             results = asyncio.run(
-                self.graph_store.search(query=query, num_results=num_results)
+                self.graph_store.search(query=enriched_query, num_results=num_results)
             )
             logger.info(f"Graph search returned {len(results)} results for: {query[:60]}")
             return results

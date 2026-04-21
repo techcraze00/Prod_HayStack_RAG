@@ -1,10 +1,18 @@
 import logging
 from typing import Dict, Any
 
+try:
+    from langsmith import traceable
+except ImportError:
+    def traceable(*args, **kwargs):
+        def decorator(fn): return fn
+        return args[0] if args and callable(args[0]) else decorator
+
 logger = logging.getLogger(__name__)
 
 
 class Synthesizer:
+    @traceable(name="Synthesizer.format", run_type="prompt")
     def synthesize(self, worker_result: Dict[str, Any], intent: str) -> str:
         """
         Formats and synthesizes the final response for the user based on worker output.

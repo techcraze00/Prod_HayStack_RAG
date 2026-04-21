@@ -3,6 +3,9 @@ OllamaRanker — Custom Haystack component for reranking via Ollama.
 
 Uses the Ollama reranker model (e.g. qllama/bge-reranker-v2-m3)
 to score query-document pairs and return top_k documents sorted by relevance.
+
+Also includes LocalCrossEncoderRanker for in-memory reranking using
+sentence-transformers as a zero-latency alternative.
 """
 
 from typing import List, Optional
@@ -99,26 +102,86 @@ class OllamaRanker:
             return 0.0
 
 
+@component
+class LocalCrossEncoderRanker:
+    """
+    In-memory reranking using sentence-transformers CrossEncoder.
+
+    Zero-latency alternative to OllamaRanker — runs entirely in-process
+    without network calls. Lazy-loads the model on first use.
+    """
+
+    def __init__(self, model: str = None, top_k: int = 5):
+        self.model_name = model or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        self.default_top_k = top_k
+        self._model = None
+
+    def warm_up(self):
+        """Lazy-load the CrossEncoder model."""
+        if self._model is None:
+            from sentence_transformers import CrossEncoder
+            self._model = CrossEncoder(self.model_name)
+
+    @component.output_types(documents=List[Document])
+    def run(
+        self,
+        query: str,
+        documents: List[Document],
+        top_k: Optional[int] = None,
+    ) -> dict:
+        """Rerank documents using CrossEncoder scoring.
+
+        Args:
+            query: The search query.
+            documents: Documents to rerank.
+            top_k: Number of top documents to return.
+
+        Returns:
+            Dict with "documents" key containing reranked documents.
+        """
+        if not documents:
+            return {"documents": []}
+
+        self.warm_up()
+
+        top_k = top_k or self.default_top_k
+        pairs = [[query, doc.content or ""] for doc in documents]
+        scores = self._model.predict(pairs)
+
+        for doc, score in zip(documents, scores):
+            doc.score = float(score)
+
+        documents.sort(key=lambda x: x.score, reverse=True)
+        return {"documents": documents[:top_k]}
+
+
 class RerankingStrategy:
     """
-    Re-ranks retrieved results using OllamaRanker.
+    Re-ranks retrieved results using either OllamaRanker or LocalCrossEncoderRanker.
+
+    Toggled by the USE_LOCAL_RERANKER setting:
+    - False (default): Use OllamaRanker (network-based)
+    - True: Use LocalCrossEncoderRanker (in-memory, zero-latency)
 
     Process:
     1. Initial retrieval (fast, broad)
-    2. Re-rank with Ollama reranker (precise)
+    2. Re-rank with selected ranker (precise)
     3. Return top_k after re-ranking
     """
 
     def __init__(self, model: str = None, url: str = None):
-        self.ranker = OllamaRanker(
-            model=model or settings.reranker_model,
-            url=url,
-        )
+        if getattr(settings, "use_local_reranker", False):
+            self.ranker = LocalCrossEncoderRanker(model=model)
+        else:
+            self.ranker = OllamaRanker(
+                model=model or settings.reranker_model,
+                url=url,
+            )
 
     def rerank(
         self, query: str, results: List[dict], top_k: int = 5
     ) -> List[dict]:
-        """Re-rank results using Ollama reranker.
+        """Re-rank results using the configured ranker.
 
         Args:
             query: Original query.
@@ -150,3 +213,4 @@ class RerankingStrategy:
             })
 
         return reranked
+

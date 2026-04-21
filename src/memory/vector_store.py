@@ -60,10 +60,13 @@ class FAISSManager:
                 return FAISS.load_local(
                     self.index_path, 
                     self.embeddings, 
-                    allow_dangerous_deserialization=True
+                    allow_dangerous_deserialization=False  # Security: prevent pickle RCE
                 )
             except Exception as e:
-                logger.error(f"Error loading index {self.index_name}: {e}. Creating new.")
+                logger.warning(
+                    f"Could not load index {self.index_name} with safe deserialization: {e}. "
+                    f"Creating a fresh index. (Old index may use unsafe pickle format.)"
+                )
         
         # Create new index
         logger.info(f"Creating new FAISS index: {self.index_name}")

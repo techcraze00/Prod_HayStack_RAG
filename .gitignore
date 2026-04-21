@@ -1,11 +1,30 @@
-.venv/
-parsed_docs/
-data/
+# Python
 __pycache__/
 *.pyc
-.env
+*.pyo
 *.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Environment & secrets
+.env
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Data & runtime
+parsed_docs/
+data/
+
+# IDE & tools
 .claude
+.gitnexus
 ignore/
 tests/
+
+# Session notes (local only)
 SESSION.md

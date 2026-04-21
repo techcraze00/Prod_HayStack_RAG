@@ -2,12 +2,19 @@
 
 Production Retrieval-Augmented Generation system built with an **Agentic Workflow Architecture** on [Haystack](https://haystack.deepset.ai/) (v2.x), with a full **Graph RAG** pipeline powered by Neo4j + Graphiti.
 
-Features:
+## Features
+
 - **Multi-Tier Memory**: Episodic vector persistence, conversational sliding-window RAM, and graph-backed episodic memory via Neo4j.
 - **Advanced Semantic Router**: 4-intent classification (General, Vector, Graph, Hybrid) via parallel LLM and Vector-grounding.
 - **Agentic Supervisor**: Orchestrator-managed Worker nodes (`VectorAgent`, `GeneralAgent`, `GraphAgent`, `HybridFusion`) for optimized inference.
 - **PostgreSQL-native**: pgvector vector RAG with semantic chunking, hybrid search, and Ollama reranking.
 - **Graph RAG**: Neo4j knowledge graph with entity extraction via Graphiti, relationship-aware retrieval, and hybrid vector+graph fusion.
+- **Postgres Graph Store Fallback**: JSONB-backed graph store as a zero-dependency alternative when Neo4j is unavailable.
+- **Metadata Filtering**: Parameterized JSONB metadata filters for scoped hybrid search.
+- **Temporal Search**: LLM-resolved temporal context for time-aware graph queries.
+- **Local Reranker**: In-memory cross-encoder reranker as an alternative to Ollama-based reranking.
+- **LangSmith Tracing**: Optional observability via `@traceable` decorators across ingestion, retrieval, and orchestration paths.
+- **Security Hardened**: SAST-audited against OWASP Top 10 for LLMs — input validation, prompt injection guards, ReDoS prevention, and safe deserialization.
 
 ## Prerequisites
 
@@ -27,7 +34,7 @@ Features:
 - **Neo4j 5.21+** *(optional, for Graph RAG)* — install via [Neo4j Desktop](https://neo4j.com/download/) or Docker:
   ```bash
   docker run -d --name neo4j -p 7474:7474 -p 7687:7687 \
-    -e NEO4J_AUTH=neo4j/rag3password neo4j:5
+    -e NEO4J_AUTH=neo4j/your_password neo4j:5
   ```
 
 ## Installation
@@ -53,8 +60,10 @@ cp .env.example .env
 At minimum, set your PostgreSQL connection string:
 
 ```env
-POSTGRES_URI=postgresql://postgres:password@localhost:5432/rag_system
+POSTGRES_URI=postgresql://user:password@localhost:5432/rag_system
 ```
+
+> **Note:** No default credentials are shipped in the codebase. You must configure `POSTGRES_URI` in `.env`.
 
 Ollama defaults (`http://localhost:11434`, `llama3.2`, `nomic-embed-text`) work out of the box if Ollama is running locally.
 
@@ -78,14 +87,25 @@ Enable the Graph RAG pipeline by setting these in `.env`:
 GRAPH_RAG_ENABLED=true
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
-NEO4J_PASSWORD=rag3password
+NEO4J_PASSWORD=your_password
 GRAPH_BUILDER_MODEL=llama3.2
 GRAPH_SEARCH_DEPTH=2
 GRAPH_SEARCH_RESULTS=10
 HYBRID_GRAPH_WEIGHT=0.4
 ```
 
-When `GRAPH_RAG_ENABLED=false` (default), the graph pipeline is completely inactive — no Neo4j connection is attempted.
+When `GRAPH_RAG_ENABLED=false` (default), the graph pipeline is completely inactive — no Neo4j connection is attempted. If Neo4j is unreachable, the system automatically falls back to `PostgresGraphStore` (JSONB-backed).
+
+### Optional: Enterprise Enhancements
+
+```env
+# Local reranker (no external API dependency)
+USE_LOCAL_RERANKER=true
+
+# LangSmith observability (requires langsmith pip package)
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=ls_abc123...
+```
 
 ## Usage
 
@@ -115,6 +135,8 @@ python -m src.main ingest path/to/document.pdf --groq
 ```
 
 Supported file types: `.pdf`, `.docx`, `.doc`, `.txt`, `.md`
+
+**Security:** File paths are validated at ingestion — path traversal (`../`) is blocked, unsupported extensions are rejected, and files exceeding 50MB are refused.
 
 Parsed documents are cached as JSON in `parsed_docs/` to avoid re-parsing on subsequent runs.
 
@@ -186,6 +208,23 @@ All enhancements are disabled by default. Enable them in `.env`:
 | Caching | `CACHE_ENABLED=true` | LRU cache with TTL for retrieval results and embeddings |
 | Fallback Handling | `FALLBACK_ENABLED=true` | Progressive fallback cascade when retrieval quality is low |
 | Monitoring | `MONITORING_ENABLED=true` | Structured logging and latency metrics (P50/P90/P99) |
+| Local Reranker | `USE_LOCAL_RERANKER=true` | In-memory cross-encoder reranker (no Ollama dependency) |
+
+## Security
+
+RAG3 has been SAST-audited against the **OWASP Top 10 for LLMs** and standard Python backend security risks. Key hardening measures:
+
+| Control | Description |
+|---------|-------------|
+| **SQL Injection** | Regex-validated metadata keys + parameterized values. Table names validated at construction. |
+| **Cypher Injection** | Neo4j driver uses parameterized queries (`$source` params). |
+| **Prompt Injection** | User query isolated from system prompts via XML delimiters. Router output normalized to known intent set. |
+| **Path Traversal** | Ingestion paths resolved to absolute, extension-whitelisted, and size-limited. |
+| **ReDoS** | All regex patterns use bounded quantifiers (`.{0,100}` vs `.*`). |
+| **Deserialization** | FAISS index loading uses safe deserialization (no pickle). |
+| **Credentials** | No default passwords in source — all credentials via `.env`. |
+
+For full details, see [`va_report.md`](./va_report.md).
 
 ## Project Structure
 
@@ -220,6 +259,7 @@ src/
 │   ├── base.py                      # Abstract interfaces (Vector, Summary, Graph)
 │   ├── postgres/
 │   │   ├── vector_store.py          # PgvectorDocumentStore + hybrid search + RRF
+│   │   ├── graph_store.py           # PostgresGraphStore (JSONB fallback for Neo4j)
 │   │   └── summary_store.py         # Summary index with pgvector
 │   └── graph/
 │       └── neo4j_store.py           # Neo4j + Graphiti wrapper (episodes, search, traversal)
@@ -232,7 +272,7 @@ src/
 │   │   ├── vector_tool.py           # Vector/hybrid search as Haystack Tool
 │   │   └── graph_search_tool.py     # Graph search tool wrapping Neo4jGraphStore
 │   └── strategies/
-│       ├── reranking.py             # OllamaRanker (bge-reranker-v2-m3)
+│       ├── reranking.py             # OllamaRanker + LocalCrossEncoderRanker
 │       ├── query_expansion.py       # LLM-based query reformulation
 │       ├── self_reflection.py       # Retrieval quality grading + refinement
 │       ├── query_router.py          # Query classification and strategy routing

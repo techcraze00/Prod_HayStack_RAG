@@ -8,8 +8,9 @@ class Settings(BaseSettings):
 
     # PostgreSQL Configuration
     postgres_uri: str = Field(
-        default="postgresql://postgres:password@localhost:5432/rag_system",
+        default="",
         alias="POSTGRES_URI",
+        description="PostgreSQL connection string. Must be set in .env.",
     )
     postgres_vector_table: str = Field(
         default="chunks", alias="POSTGRES_VECTOR_TABLE"
@@ -30,6 +31,7 @@ class Settings(BaseSettings):
     reranker_model: str = Field(
         default="qllama/bge-reranker-v2-m3", alias="RERANKER_MODEL"
     )
+    use_local_reranker: bool = Field(default=False, alias="USE_LOCAL_RERANKER")
     ollama_num_ctx: int = Field(default=8192, alias="OLLAMA_NUM_CTX")
 
     # Groq Configuration
@@ -103,7 +105,7 @@ class Settings(BaseSettings):
     graph_rag_enabled: bool = Field(default=False, alias="GRAPH_RAG_ENABLED")
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
-    neo4j_password: str = Field(default="rag3password", alias="NEO4J_PASSWORD")
+    neo4j_password: str = Field(default="", alias="NEO4J_PASSWORD")
     graph_builder_model: str = Field(default="llama3.2", alias="GRAPH_BUILDER_MODEL")
     graph_search_depth: int = Field(default=2, alias="GRAPH_SEARCH_DEPTH")
     graph_search_results: int = Field(default=10, alias="GRAPH_SEARCH_RESULTS")

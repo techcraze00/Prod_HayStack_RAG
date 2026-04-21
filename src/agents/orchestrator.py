@@ -8,6 +8,13 @@ from src.retrieval.session import RAGSession
 from src.retrieval.agent import AdvancedRAGAgent
 from src.config import settings
 
+try:
+    from langsmith import traceable
+except ImportError:
+    def traceable(*args, **kwargs):
+        def decorator(fn): return fn
+        return args[0] if args and callable(args[0]) else decorator
+
 logger = logging.getLogger(__name__)
 
 class Orchestrator:
@@ -49,6 +56,7 @@ class Orchestrator:
             except Exception as e:
                 logger.warning(f"GraphVectorFusion init failed: {e}")
 
+    @traceable(name="Orchestrator.run", run_type="chain")
     def run(self, query: str, session: RAGSession) -> str:
         """
         Executes the agentic workflow: Route -> Dispatch -> Synthesize
@@ -103,6 +111,7 @@ class Orchestrator:
 
         return final_answer
 
+    @traceable(name="Orchestrator.hybrid_fusion", run_type="retriever")
     def _run_hybrid(self, query: str, chat_history=None, memory_context: str = "") -> dict:
         """
         Run hybrid vector + graph retrieval and generate an answer from fused context.

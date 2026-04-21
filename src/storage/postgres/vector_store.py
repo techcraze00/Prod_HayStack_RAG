@@ -9,8 +9,12 @@ Enhanced with:
 - Metadata filtering
 """
 
+import logging
 from typing import List, Dict, Any, Optional, Tuple
 
+logger = logging.getLogger(__name__)
+
+import re
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from haystack import Document
@@ -36,6 +40,9 @@ class PostgresVectorStore(VectorStoreInterface):
     - Metadata filtering
     """
 
+    # Strict regex for valid PostgreSQL identifiers (prevents DDL injection)
+    _VALID_TABLE_NAME = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]{0,62}$')
+
     def __init__(
         self,
         connection_string: str,
@@ -43,6 +50,12 @@ class PostgresVectorStore(VectorStoreInterface):
         embedding_model: str = "nomic-embed-text",
         ollama_base_url: str = "http://localhost:11434",
     ):
+        # Validate table name to prevent SQL injection in DDL statements
+        if not self._VALID_TABLE_NAME.match(table_name):
+            raise ValueError(
+                f"Invalid table name '{table_name}'. "
+                f"Must match pattern: [a-zA-Z_][a-zA-Z0-9_]{{0,62}}"
+            )
         self.connection_string = connection_string
         self.table_name = table_name
 
@@ -232,6 +245,113 @@ class PostgresVectorStore(VectorStoreInterface):
         # BM25 search
         bm25_results = self.bm25_search(query, retrieval_k)
 
+        return self._reciprocal_rank_fusion(
+            vector_results, bm25_results, top_k, vector_weight, bm25_weight
+        )
+
+    # ─── Metadata Filter Builder ──────────────────────────────────────
+
+    def _build_metadata_filter(self, filters: Dict[str, Any]) -> Tuple[str, List[Any]]:
+        """Builds a SQL WHERE clause and parameters for JSONB meta column."""
+        if not filters:
+            return "1=1", []
+
+        where_conditions = []
+        params = []
+        
+        # Regex to validate metadata keys (prevent SQL injection)
+        key_pattern = re.compile(r'^[a-zA-Z0-9_]+$')
+
+        for key, value in filters.items():
+            if not key_pattern.match(key):
+                logger.warning(f"Skipping invalid metadata filter key: {key}")
+                continue
+                
+            if isinstance(value, dict):
+                if "$gte" in value:
+                    where_conditions.append(f"(meta->>'{key}')::text >= %s")
+                    params.append(str(value["$gte"]))
+                if "$lte" in value:
+                    where_conditions.append(f"(meta->>'{key}')::text <= %s")
+                    params.append(str(value["$lte"]))
+                if "$in" in value:
+                    placeholders = ",".join(["%s"] * len(value["$in"]))
+                    where_conditions.append(f"(meta->>'{key}') IN ({placeholders})")
+                    params.extend(value["$in"])
+            elif isinstance(value, list):
+                placeholders = ",".join(["%s"] * len(value))
+                where_conditions.append(f"(meta->>'{key}') IN ({placeholders})")
+                params.extend(value)
+            else:
+                where_conditions.append(f"(meta->>'{key}') = %s")
+                params.append(str(value))
+
+        where_clause = " AND ".join(where_conditions)
+        return where_clause, params
+
+    # ─── Filtered Hybrid Search ───────────────────────────────────────
+
+    def hybrid_search_with_filter(
+        self,
+        query: str,
+        top_k: int = 5,
+        filters: Dict[str, Any] = None,
+        vector_weight: float = 0.7,
+        bm25_weight: float = 0.3,
+        retrieval_k: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Hybrid search with metadata filtering on both vector and BM25 sub-queries."""
+        self._ensure_fts_index()
+        where_clause, params = self._build_metadata_filter(filters)
+
+        # Generate Query Embedding
+        query_embedding = self._embedder.run(text=query)["embedding"]
+
+        conn = psycopg2.connect(self.connection_string)
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # 1. Filtered Vector Search
+                cur.execute(f"""
+                    SELECT 
+                        content,
+                        1 - (embedding <=> %s::vector) as vector_score,
+                        meta as metadata
+                    FROM {self.table_name}
+                    WHERE {where_clause}
+                    ORDER BY vector_score DESC
+                    LIMIT %s
+                """, [query_embedding] + params + [retrieval_k])
+
+                vector_results = [
+                    {
+                        "text": row['content'],
+                        "score": float(row['vector_score']),
+                        "metadata": row['metadata'] or {}
+                    }
+                    for row in cur.fetchall()
+                ]
+
+                # 2. Filtered BM25 Search
+                cur.execute(f"""
+                    SELECT 
+                        content,
+                        ts_rank_cd(content_tsv, plainto_tsquery('english', %s), 32) as bm25_score,
+                        meta as metadata
+                    FROM {self.table_name}
+                    WHERE content_tsv @@ plainto_tsquery('english', %s)
+                      AND {where_clause}
+                    ORDER BY bm25_score DESC
+                    LIMIT %s
+                """, [query, query] + params + [retrieval_k])
+
+                bm25_results = [
+                    (row['content'], float(row['bm25_score']), row['metadata'] or {})
+                    for row in cur.fetchall()
+                ]
+        finally:
+            conn.close()
+
+        # 3. Fuse Results
         return self._reciprocal_rank_fusion(
             vector_results, bm25_results, top_k, vector_weight, bm25_weight
         )
